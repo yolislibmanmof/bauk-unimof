@@ -214,9 +214,10 @@ class Security
         // Verifikasi MIME type asli (anti file palsu ber-ekstensi ganda)
         $finfo = new \finfo(FILEINFO_MIME_TYPE);
         $mime  = $finfo->file($file['tmp_name']);
-        $allowedMime = [
-            'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-            'application/pdf',
+$allowedMime = [
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+    'image/svg+xml', 'image/x-icon', 'image/vnd.microsoft.icon',
+    'application/pdf',
             'application/msword',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             'application/vnd.ms-excel',

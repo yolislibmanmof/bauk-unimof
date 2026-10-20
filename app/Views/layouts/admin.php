@@ -75,7 +75,21 @@ $serverTime = date('d F Y, H:i:s');
     <title><?= htmlspecialchars($pageTitle) ?></title>
     
     <!-- Favicon -->
-    <link rel="icon" type="image/png" href="<?= asset('images/favicon.png') ?>">
+    <?php
+$__admCfg = [];
+try {
+    foreach (\App\Helpers\Database::getInstance()->fetchAll("SELECT `key`, `value` FROM settings WHERE `key` IN ('site_logo','site_favicon')") as $__s) {
+        $__admCfg[$__s['key']] = $__s['value'];
+    }
+} catch (\Throwable $__e) {}
+$__admFav = !empty($__admCfg['site_favicon']) ? url('uploads/settings/' . $__admCfg['site_favicon']) : null;
+$__admLogo = !empty($__admCfg['site_logo']) ? url('uploads/settings/' . $__admCfg['site_logo']) : null;
+?>
+<?php if ($__admFav): ?>
+    <link rel="icon" type="image/x-icon" href="<?= htmlspecialchars($__admFav) ?>">
+<?php else: ?>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%231a5276'/%3E%3Ctext x='50' y='68' font-family='Arial' font-size='60' font-weight='bold' text-anchor='middle' fill='white'%3EB%3C/text%3E%3C/svg%3E">
+<?php endif; ?>
     
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -95,11 +109,15 @@ $serverTime = date('d F Y, H:i:s');
         <!-- Brand -->
         <div class="sidebar-header">
             <a href="<?= url('admin') ?>" class="sidebar-brand">
-                <div class="brand-icon">B</div>
-                <div class="brand-text">
-                    <h3>BAUK</h3>
-                    <span>UNIMOF Admin</span>
-                </div>
+<?php if ($__admLogo): ?>
+    <img src="<?= htmlspecialchars($__admLogo) ?>" alt="BAUK" style="height:40px;width:auto;border-radius:8px;">
+<?php else: ?>
+    <div class="brand-icon">B</div>
+<?php endif; ?>
+<div class="brand-text">
+    <h3>BAUK</h3>
+    <span>UNIMOF Admin</span>
+</div>
             </a>
             <button class="sidebar-close" id="sidebarClose"><i class="bi bi-x-lg"></i></button>
         </div>
@@ -165,6 +183,25 @@ $serverTime = date('d F Y, H:i:s');
                 </a>
             </div>
             
+            <!-- Profil Website (ULTIMATE) -->
+<?php if (Auth::hasRole(['super_admin', 'admin_bauk'])): ?>
+<div class="nav-section">
+    <span class="nav-title">Profil Website</span>
+    <a href="<?= url('admin/struktur-organisasi') ?>" class="nav-item <?= $cp === '/admin/struktur-organisasi' ? 'active' : '' ?>">
+        <i class="bi bi-diagram-3-fill"></i>
+        <span>Struktur Organisasi</span>
+    </a>
+    <a href="<?= url('admin/tupoksi') ?>" class="nav-item <?= $cp === '/admin/tupoksi' ? 'active' : '' ?>">
+        <i class="bi bi-clipboard-check-fill"></i>
+        <span>Tupoksi</span>
+    </a>
+    <a href="<?= url('admin/pengaturan') ?>" class="nav-item <?= $cp === '/admin/pengaturan' ? 'active' : '' ?>">
+        <i class="bi bi-palette-fill"></i>
+        <span>Branding & Konten</span>
+    </a>
+</div>
+<?php endif; ?>
+
             <!-- Konten Publikasi -->
             <div class="nav-section">
                 <span class="nav-title">Konten Publikasi</span>

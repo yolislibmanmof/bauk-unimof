@@ -64,8 +64,18 @@ require_once __DIR__ . '/app/Helpers/ActivityLog.php';
 require_once __DIR__ . '/app/Helpers/Auth.php';
 require_once __DIR__ . '/app/Helpers/Router.php';
 require_once __DIR__ . '/app/Helpers/View.php';
+// ===== NEW ULTIMATE HELPERS =====
+require_once __DIR__ . '/app/Helpers/Dashboard.php';
+require_once __DIR__ . '/app/Helpers/Chart.php';
+require_once __DIR__ . '/app/Helpers/Export.php';
+require_once __DIR__ . '/app/Helpers/Cache.php';
+require_once __DIR__ . '/app/Helpers/Notification.php';
+require_once __DIR__ . '/app/Helpers/SecurityEnhanced.php';
+require_once __DIR__ . '/app/Helpers/Api.php';
+require_once __DIR__ . '/app/Helpers/Import.php';
+require_once __DIR__ . '/app/Helpers/Calendar.php';
 
-use App\Helpers\{Security, Auth, ActivityLog, Router, View, Database};
+use App\Helpers\{Security, Auth, ActivityLog, Router, View, Database, Dashboard, Chart, Export, Cache, Notification, SecurityEnhanced, Api, Import, Calendar};
 
 Security::setSecurityHeaders();
 
@@ -230,15 +240,37 @@ Router::get('/admin/logout', function () {
 
 Router::get('/admin', function () {
     Auth::requireAuth();
-    $db = Database::getInstance();
-    $stats = [
-        'total_pegawai'       => $db->count('pegawai', "status = 'active' AND deleted_at IS NULL"),
-        'total_aset'          => $db->count('aset', "status = 'active' AND deleted_at IS NULL"),
-        'transaksi_bulan_ini' => $db->count('transaksi_keuangan', "MONTH(transaction_date) = MONTH(CURRENT_DATE()) AND YEAR(transaction_date) = YEAR(CURRENT_DATE()) AND deleted_at IS NULL"),
-        'pengumuman_aktif'    => $db->count('pengumuman', "is_active = 1"),
-    ];
-    $recentActivities = $db->fetchAll("SELECT al.*, u.full_name FROM activity_logs al LEFT JOIN users u ON al.user_id = u.id ORDER BY al.created_at DESC LIMIT 10");
-    View::renderWithLayout('admin', 'admin/dashboard', ['title' => 'Dashboard', 'stats' => $stats, 'recentActivities' => $recentActivities]);
+    
+    // Update last_seen untuk tracking user online
+    Database::getInstance()->update('users', ['last_seen' => date('Y-m-d H:i:s')], 'id = ?', [Auth::id()]);
+    
+    // Stats komprehensif dari Dashboard Helper
+    $stats = Dashboard::getStats();
+    
+    // Data untuk charts
+    $financialTrend = Dashboard::getFinancialTrend();
+    $periodComparison = Dashboard::getPeriodComparison();
+    
+    // Activity timeline
+    $recentActivities = Dashboard::getActivityTimeline(10);
+    
+    // Upcoming events dari Calendar Helper
+    $upcomingEvents = Calendar::getUpcomingEvents(7, 5);
+    
+    // Notifications unread
+    $unreadNotifications = Notification::getUnreadCount(Auth::id());
+    $recentNotifications = Notification::getForUser(Auth::id(), 5, true);
+    
+    View::renderWithLayout('admin', 'admin/dashboard', [
+        'title' => 'Dashboard',
+        'stats' => $stats,
+        'financialTrend' => $financialTrend,
+        'periodComparison' => $periodComparison,
+        'recentActivities' => $recentActivities,
+        'upcomingEvents' => $upcomingEvents,
+        'unreadNotifications' => $unreadNotifications,
+        'recentNotifications' => $recentNotifications,
+    ]);
 });
 
 // =====================================================
@@ -1391,74 +1423,81 @@ Router::get('/admin/pengaturan', function () {
 Router::post('/admin/pengaturan/simpan', function () {
     Auth::requireRole(['super_admin', 'admin_bauk']);
     $db = Database::getInstance();
-    $errors = [];
 
-    // 1. Handle Text/Textarea Inputs
-    $textKeys = ['site_name', 'site_description', 'visi_text', 'misi_text', 'kepala_bauk_name', 'kepala_bauk_title', 'contact_address', 'contact_phone', 'contact_email'];
-    foreach ($textKeys as $key) {
-        $value = Security::sanitize($_POST[$key] ?? '');
+    // 1. Verifikasi CSRF
+    if (!Security::verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+        flash('error', 'Sesi berakhir atau token tidak valid. Silakan ulangi.');
+        header('Location: ' . url('admin/pengaturan')); exit;
+    }
+
+    $errors = [];
+    $saved  = 0;
+
+    // 2. Helper upsert (update jika ada, insert jika belum)
+    $upsert = function (string $key, string $value, string $type = 'text', string $group = 'general', string $desc = '') use ($db) {
         $existing = $db->fetch("SELECT id FROM settings WHERE `key` = ?", [$key]);
         if ($existing) {
             $db->update('settings', ['value' => $value], 'id = ?', [$existing['id']]);
         } else {
-            $db->insert('settings', ['key' => $key, 'value' => $value, 'type' => 'text', 'group' => 'general']);
+            $db->insert('settings', ['key' => $key, 'value' => $value, 'type' => $type, 'group' => $group, 'description' => $desc]);
+        }
+    };
+
+    // 3. Simpan input teks/textarea/boolean/number dari name="settings[key]"
+    $submitted = $_POST['settings'] ?? [];
+    if (is_array($submitted)) {
+        foreach ($submitted as $key => $value) {
+            $key = preg_replace('/[^a-z0-9_]/', '_', strtolower((string)$key));
+            $row = $db->fetch("SELECT type FROM settings WHERE `key` = ?", [$key]);
+            if ($row && $row['type'] === 'file') continue; // file ditangani terpisah
+            $upsert($key, Security::sanitize(is_array($value) ? '' : (string)$value));
+            $saved++;
         }
     }
 
-    // 2. Handle File Uploads (Logo, Favicon, Photos)
+    // 4. Kompatibilitas format lama name="key" langsung
+    foreach (['site_name','site_description','visi_text','misi_text','tujuan_text','kepala_bauk_name','kepala_bauk_title','contact_address','contact_phone','contact_email'] as $key) {
+        if (isset($_POST[$key]) && !isset($submitted[$key])) {
+            $upsert($key, Security::sanitize((string)$_POST[$key]));
+            $saved++;
+        }
+    }
+
+    // 5. Upload file branding (logo, favicon, foto kepala, foto struktur)
     $fileKeys = [
-        'site_logo' => ['jpg', 'jpeg', 'png', 'svg', 'webp', 2048], // max 2MB
-        'site_favicon' => ['ico', 'png', 'svg', 1024], // max 1MB
-        'kepala_bauk_photo' => ['jpg', 'jpeg', 'png', 'webp', 2048],
-        'struktur_organisasi_photo' => ['jpg', 'jpeg', 'png', 'webp', 5120], // max 5MB
+        'site_logo'                 => [['jpg','jpeg','png','svg','webp'], 2 * 1024 * 1024, 'general', 'Logo website'],
+        'site_favicon'              => [['ico','png','svg'],              1 * 1024 * 1024, 'general', 'Favicon browser'],
+        'kepala_bauk_photo'         => [['jpg','jpeg','png','webp'],      2 * 1024 * 1024, 'general', 'Foto Kepala BAUK'],
+        'struktur_organisasi_photo' => [['jpg','jpeg','png','webp'],      5 * 1024 * 1024, 'general', 'Bagan struktur organisasi'],
     ];
-
-    foreach ($fileKeys as $key => $rules) {
-        if (isset($_FILES[$key]) && $_FILES[$key]['error'] === UPLOAD_ERR_OK) {
-            $extAllowed = array_slice($rules, 0, -1);
-            $maxSize = end($rules) * 1024;
-            
-            $errs = Security::validateFileUpload($_FILES[$key], $extAllowed, $maxSize);
-            if ($errs) {
-                $errors = array_merge($errors, ["{$key}: " . implode(', ', $errs)]);
-            } else {
-                $dir = ensureUploadDir('settings');
-                $newName = safeFilename($_FILES[$key]['name']);
-                
-                if (move_uploaded_file($_FILES[$key]['tmp_name'], $dir . $newName)) {
-                    // Hapus file lama jika ada
-                    $oldSetting = $db->fetch("SELECT value FROM settings WHERE `key` = ?", [$key]);
-                    if ($oldSetting && !empty($oldSetting['value'])) {
-                        $oldFile = UPLOAD_DIR . 'settings/' . basename($oldSetting['value']);
-                        if (file_exists($oldFile) && is_file($oldFile)) {
-                            @unlink($oldFile);
-                        }
-                    }
-                    
-                    // Simpan nama file baru ke DB
-                    $existing = $db->fetch("SELECT id FROM settings WHERE `key` = ?", [$key]);
-                    if ($existing) {
-                        $db->update('settings', ['value' => $newName], 'id = ?', [$existing['id']]);
-                    } else {
-                        $db->insert('settings', ['key' => $key, 'value' => $newName, 'type' => 'file', 'group' => 'branding']);
-                    }
-                } else {
-                    $errors[] = "{$key}: Gagal memindahkan file.";
-                }
+    foreach ($fileKeys as $key => $cfg) {
+        if (!isset($_FILES[$key]) || $_FILES[$key]['error'] !== UPLOAD_ERR_OK) continue;
+        [$exts, $max, $group, $desc] = $cfg;
+        $errs = Security::validateFileUpload($_FILES[$key], $exts, $max);
+        if ($errs) { $errors[] = "{$key}: " . implode(', ', $errs); continue; }
+        $dir = ensureUploadDir('settings');
+        $newName = safeFilename($_FILES[$key]['name']);
+        if (move_uploaded_file($_FILES[$key]['tmp_name'], $dir . $newName)) {
+            $old = $db->fetch("SELECT value FROM settings WHERE `key` = ?", [$key]);
+            if ($old && !empty($old['value'])) {
+                $oldFile = UPLOAD_DIR . 'settings/' . basename($old['value']);
+                if (is_file($oldFile)) @unlink($oldFile);
             }
+            $upsert($key, $newName, 'file', $group, $desc);
+            $saved++;
+        } else {
+            $errors[] = "{$key}: gagal memindahkan file upload";
         }
     }
 
-    if (!empty($errors)) {
+    if ($errors) {
         $_SESSION['flash_error'] = $errors;
-        header('Location: ' . url('admin/pengaturan'));
-        exit;
+        header('Location: ' . url('admin/pengaturan')); exit;
     }
 
-    ActivityLog::create(Auth::id(), 'update', 'Update pengaturan sistem & branding', 'settings');
-    flash('success', 'Pengaturan berhasil disimpan.');
-    header('Location: ' . url('admin/pengaturan'));
-    exit;
+    ActivityLog::create(Auth::id(), 'update', "Update pengaturan sistem ({$saved} item)", 'settings');
+    flash('success', "Pengaturan berhasil disimpan ({$saved} perubahan).");
+    header('Location: ' . url('admin/pengaturan')); exit;
 });
 
 // =====================================================
@@ -1537,4 +1576,379 @@ Router::post('/admin/profil/update', function () {
 // ██████  ██ ██      ███████    ██
 // =====================================================
 
+// =====================================================
+//  █████  ██████  ██ 
+// ██   ██ ██   ██ ██ 
+// ███████ ██████  ██ 
+// ██   ██ ██      ██ 
+// ██   ██ ██      ██  API ENDPOINTS
+// =====================================================
+
+Router::get('/api/dashboard/stats', function () {
+    if (!Api::authenticate()) return;
+    if (!Api::rateLimit(Security::getClientIp())) return;
+    Api::success(Dashboard::getStats(), 'Dashboard statistics retrieved');
+});
+
+Router::get('/api/pegawai', function () {
+    if (!Api::authenticate()) return;
+    if (!Api::rateLimit(Security::getClientIp())) return;
+    $db = Database::getInstance();
+    $search = Security::sanitize($_GET['q'] ?? '');
+    $where = 'deleted_at IS NULL';
+    $params = [];
+    if ($search) { $where .= ' AND (full_name LIKE ? OR nip LIKE ?)'; $l = "%{$search}%"; array_push($params, $l, $l); }
+    $pegawai = $db->fetchAll("SELECT id, uuid, nip, full_name, position, status, email, phone FROM pegawai WHERE {$where} ORDER BY full_name LIMIT 100", $params);
+    Api::success($pegawai, count($pegawai) . ' pegawai ditemukan');
+});
+
+Router::get('/api/keuangan/summary', function () {
+    if (!Api::authenticate()) return;
+    if (!Api::rateLimit(Security::getClientIp())) return;
+    $db = Database::getInstance();
+    $summary = [
+        'pemasukan' => $db->fetch("SELECT COALESCE(SUM(amount),0) AS t FROM transaksi_keuangan WHERE type='pemasukan' AND status='approved' AND deleted_at IS NULL")['t'] ?? 0,
+        'pengeluaran' => $db->fetch("SELECT COALESCE(SUM(amount),0) AS t FROM transaksi_keuangan WHERE type='pengeluaran' AND status='approved' AND deleted_at IS NULL")['t'] ?? 0,
+        'pending' => $db->count('transaksi_keuangan', "status='pending' AND deleted_at IS NULL"),
+    ];
+    Api::success($summary, 'Financial summary retrieved');
+});
+
+Router::get('/api/kegiatan/upcoming', function () {
+    if (!Api::authenticate()) return;
+    $days = max(1, min(30, (int)($_GET['days'] ?? 7)));
+    Api::success(Calendar::getUpcomingEvents($days), 'Upcoming events retrieved');
+});
+
+Router::get('/api/notifications', function () {
+    if (!Api::authenticate()) return;
+    $userId = $_SESSION['api_user_id'] ?? 0;
+    Api::success([
+        'unread_count' => Notification::getUnreadCount($userId),
+        'notifications' => Notification::getForUser($userId, 20)
+    ], 'Notifications retrieved');
+});
+
+Router::post('/api/notifications/read-all', function () {
+    if (!Api::authenticate()) return;
+    $userId = $_SESSION['api_user_id'] ?? 0;
+    Notification::markAllAsRead($userId);
+    Api::success(null, 'All notifications marked as read');
+});
+
+// =====================================================
+//  █████  ██████  ██ ████████ ██ ███████
+// ██   ██ ██   ██ ██    ██    ██ ██
+// ███████ ██████  ██    ██    ██ ███████
+// ██   ██ ██      ██    ██    ██      ██
+// ██   ██ ██      ██    ██    ██ ███████  PUBLIC: PROFIL
+// =====================================================
+
+Router::get('/visi-misi', function () {
+    View::renderWithLayout('public', 'public/visi-misi', ['title' => 'Visi & Misi - BAUK UNIMOF']);
+});
+
+Router::get('/struktur-organisasi', function () {
+    View::renderWithLayout('public', 'public/struktur-organisasi', ['title' => 'Struktur Organisasi - BAUK UNIMOF']);
+});
+
+Router::get('/tupoksi', function () {
+    View::renderWithLayout('public', 'public/tupoksi', ['title' => 'Tupoksi - BAUK UNIMOF']);
+});
+
+// =====================================================
+//  █████  ██████  ██ ████████ ██ ███    ███ ██   ██ ███████ ██████
+// ██   ██ ██   ██ ██    ██    ██ ████  ████ ██  ██  ██      ██   ██
+// ███████ ██████  ██    ██    ██ ██ ████ ██ █████   █████   ██████
+// ██   ██ ██   ██ ██    ██    ██ ██  ██  ██ ██  ██  ██      ██   ██
+// ██   ██ ██   ██ ██    ██    ██ ██      ██ ██   ██ ███████ ██   ██
+// ADMIN: STRUKTUR ORGANISASI (CRUD)
+// =====================================================
+
+Router::get('/admin/struktur-organisasi', function () {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    $items = Database::getInstance()->fetchAll("
+        SELECT * FROM struktur_organisasi 
+        WHERE deleted_at IS NULL 
+        ORDER BY level ASC, sort_order ASC, id ASC
+    ");
+    View::renderWithLayout('admin', 'admin/struktur/index', [
+        'title' => 'Struktur Organisasi',
+        'items' => $items,
+    ]);
+});
+
+Router::get('/admin/struktur-organisasi/tambah', function () {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    $parents = Database::getInstance()->fetchAll("
+        SELECT * FROM struktur_organisasi 
+        WHERE deleted_at IS NULL 
+        ORDER BY level ASC, sort_order ASC
+    ");
+    View::renderWithLayout('admin', 'admin/struktur/form', [
+        'title' => 'Tambah Jabatan',
+        'mode' => 'add',
+        'data' => null,
+        'parents' => $parents,
+    ]);
+});
+
+Router::get('/admin/struktur-organisasi/edit/{id}', function (string $id) {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    $data = Database::getInstance()->fetch("
+        SELECT * FROM struktur_organisasi WHERE id = ? AND deleted_at IS NULL
+    ", [(int)$id]);
+    if (!$data) {
+        flash('error', 'Jabatan tidak ditemukan.');
+        header('Location: ' . url('admin/struktur-organisasi'));
+        exit;
+    }
+    $parents = Database::getInstance()->fetchAll("
+        SELECT * FROM struktur_organisasi 
+        WHERE deleted_at IS NULL AND id != ?
+        ORDER BY level ASC, sort_order ASC
+    ", [(int)$id]);
+    View::renderWithLayout('admin', 'admin/struktur/form', [
+        'title' => 'Edit Jabatan',
+        'mode' => 'edit',
+        'data' => $data,
+        'parents' => $parents,
+    ]);
+});
+
+Router::post('/admin/struktur-organisasi/simpan', function () {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    if (!Security::verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+        flash('error', 'Sesi berakhir atau token tidak valid.');
+        header('Location: ' . url('admin/struktur-organisasi'));
+        exit;
+    }
+
+    $db = Database::getInstance();
+    $id = max(0, (int)($_POST['id'] ?? 0));
+    $errors = [];
+
+    $namaJabatan = Security::sanitize($_POST['nama_jabatan'] ?? '');
+    $namaPejabat = Security::sanitize($_POST['nama_pejabat'] ?? '');
+    $nip         = Security::sanitize($_POST['nip'] ?? '');
+    $parentId    = max(0, (int)($_POST['parent_id'] ?? 0)) ?: null;
+    $level       = max(1, min(10, (int)($_POST['level'] ?? 1)));
+    $sortOrder   = max(0, (int)($_POST['sort_order'] ?? 0));
+
+    if ($namaJabatan === '') $errors[] = 'Nama jabatan wajib diisi';
+
+    // Auto-hitung level dari parent
+    if ($parentId) {
+        $parent = $db->fetch("SELECT level FROM struktur_organisasi WHERE id = ? AND deleted_at IS NULL", [$parentId]);
+        if ($parent) $level = (int)$parent['level'] + 1;
+    } else {
+        $level = 1;
+    }
+
+    // Upload foto
+    $existingFoto = $id ? ($db->fetch("SELECT foto FROM struktur_organisasi WHERE id = ?", [$id])['foto'] ?? null) : null;
+    $fotoName = $existingFoto;
+    if (isset($_FILES['foto']) && $_FILES['foto']['error'] === UPLOAD_ERR_OK) {
+        $errs = Security::validateFileUpload($_FILES['foto'], ['jpg', 'jpeg', 'png', 'webp'], 2 * 1024 * 1024);
+        if ($errs) {
+            $errors = array_merge($errors, $errs);
+        } else {
+            $dir = ensureUploadDir('struktur');
+            $new = safeFilename($_FILES['foto']['name']);
+            if (move_uploaded_file($_FILES['foto']['tmp_name'], $dir . $new)) {
+                // Hapus foto lama jika ada
+                if ($existingFoto) {
+                    $oldFile = UPLOAD_DIR . 'struktur/' . basename($existingFoto);
+                    if (is_file($oldFile)) @unlink($oldFile);
+                }
+                $fotoName = $new;
+            }
+        }
+    }
+
+    if ($errors) {
+        $_SESSION['form_old'] = $_POST;
+        $_SESSION['flash_error'] = $errors;
+        header('Location: ' . url($id ? 'admin/struktur-organisasi/edit/' . $id : 'admin/struktur-organisasi/tambah'));
+        exit;
+    }
+
+    $payload = [
+        'nama_jabatan' => $namaJabatan,
+        'nama_pejabat' => $namaPejabat ?: null,
+        'nip'          => $nip ?: null,
+        'parent_id'    => $parentId,
+        'level'        => $level,
+        'sort_order'   => $sortOrder,
+        'foto'         => $fotoName,
+        'is_active'    => 1,
+    ];
+
+    if ($id > 0) {
+        $db->update('struktur_organisasi', $payload, 'id = ?', [$id]);
+        ActivityLog::create(Auth::id(), 'update', "Update struktur: {$namaJabatan}", 'struktur_organisasi', $id);
+        flash('success', "Jabatan \"{$namaJabatan}\" berhasil diperbarui.");
+    } else {
+        $payload['uuid'] = Security::generateUuid();
+        $payload['created_by'] = Auth::id();
+        $id = $db->insert('struktur_organisasi', $payload);
+        ActivityLog::create(Auth::id(), 'create', "Tambah struktur: {$namaJabatan}", 'struktur_organisasi', $id);
+        flash('success', "Jabatan \"{$namaJabatan}\" berhasil ditambahkan.");
+    }
+    clearOld();
+    header('Location: ' . url('admin/struktur-organisasi'));
+    exit;
+});
+
+Router::get('/admin/struktur-organisasi/hapus/{id}', function (string $id) {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    $db = Database::getInstance();
+    $item = $db->fetch("SELECT nama_jabatan, foto FROM struktur_organisasi WHERE id = ? AND deleted_at IS NULL", [(int)$id]);
+    if ($item) {
+        // Cek apakah punya anak
+        $childCount = $db->count('struktur_organisasi', "parent_id = ? AND deleted_at IS NULL", [(int)$id]);
+        if ($childCount > 0) {
+            flash('error', "Tidak dapat menghapus jabatan \"{$item['nama_jabatan']}\" karena masih memiliki {$childCount} jabatan bawahan. Hapus bawahan terlebih dahulu.");
+            header('Location: ' . url('admin/struktur-organisasi'));
+            exit;
+        }
+        // Hapus file foto
+        if (!empty($item['foto'])) {
+            $file = UPLOAD_DIR . 'struktur/' . basename($item['foto']);
+            if (is_file($file)) @unlink($file);
+        }
+        $db->update('struktur_organisasi', ['deleted_at' => date('Y-m-d H:i:s')], 'id = ?', [(int)$id]);
+        ActivityLog::create(Auth::id(), 'delete', "Hapus struktur: {$item['nama_jabatan']}", 'struktur_organisasi', (int)$id);
+        flash('success', "Jabatan \"{$item['nama_jabatan']}\" berhasil dihapus.");
+    }
+    header('Location: ' . url('admin/struktur-organisasi'));
+    exit;
+});
+
+// =====================================================
+//  █████  ██████  ██ ████████ ██ ████████  ██████  ██ ██   ██
+// ██   ██ ██   ██ ██    ██    ██    ██    ██    ██ ██  ██ ██
+// ███████ ██████  ██    ██    ██    ██    ██    ██ ██   ███
+// ██   ██ ██      ██    ██    ██    ██    ██    ██ ██  ██ ██
+// ██   ██ ██      ██    ██    ██    ██     ██████  ██ ██   ██
+// ADMIN: TUPOKSI (CRUD)
+// =====================================================
+
+Router::get('/admin/tupoksi', function () {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    $items = Database::getInstance()->fetchAll("
+        SELECT * FROM tupoksi 
+        WHERE deleted_at IS NULL 
+        ORDER BY sort_order ASC, id ASC
+    ");
+    View::renderWithLayout('admin', 'admin/tupoksi/index', [
+        'title' => 'Tupoksi',
+        'items' => $items,
+    ]);
+});
+
+Router::get('/admin/tupoksi/tambah', function () {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    View::renderWithLayout('admin', 'admin/tupoksi/form', [
+        'title' => 'Tambah Unit Kerja',
+        'mode' => 'add',
+        'data' => null,
+    ]);
+});
+
+Router::get('/admin/tupoksi/edit/{id}', function (string $id) {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    $data = Database::getInstance()->fetch("
+        SELECT * FROM tupoksi WHERE id = ? AND deleted_at IS NULL
+    ", [(int)$id]);
+    if (!$data) {
+        flash('error', 'Unit kerja tidak ditemukan.');
+        header('Location: ' . url('admin/tupoksi'));
+        exit;
+    }
+    View::renderWithLayout('admin', 'admin/tupoksi/form', [
+        'title' => 'Edit Unit Kerja',
+        'mode' => 'edit',
+        'data' => $data,
+    ]);
+});
+
+Router::post('/admin/tupoksi/simpan', function () {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    if (!Security::verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+        flash('error', 'Sesi berakhir atau token tidak valid.');
+        header('Location: ' . url('admin/tupoksi'));
+        exit;
+    }
+
+    $db = Database::getInstance();
+    $id = max(0, (int)($_POST['id'] ?? 0));
+    $errors = [];
+
+    $unitKerja    = Security::sanitize($_POST['unit_kerja'] ?? '');
+    $kodeUnit     = strtoupper(Security::sanitize($_POST['kode_unit'] ?? ''));
+    $namaJabatan  = Security::sanitize($_POST['nama_jabatan'] ?? '');
+    $tugasPokok   = Security::cleanInput($_POST['tugas_pokok'] ?? '');
+    $fungsi       = Security::cleanInput($_POST['fungsi'] ?? '');
+    $icon         = preg_replace('/[^a-z0-9\-_]/', '', $_POST['icon'] ?? 'bi-briefcase');
+    $warna        = preg_replace('/[^#a-fA-F0-9]/', '', $_POST['warna'] ?? '#1a5276');
+    $sortOrder    = max(0, (int)($_POST['sort_order'] ?? 0));
+    $isActive     = isset($_POST['is_active']) && (int)$_POST['is_active'] === 1 ? 1 : 0;
+
+    if ($unitKerja === '')   $errors[] = 'Nama unit kerja wajib diisi';
+    if ($namaJabatan === '') $errors[] = 'Nama jabatan wajib diisi';
+    if ($tugasPokok === '')  $errors[] = 'Tugas pokok wajib diisi';
+    if (!preg_match('/^#[0-9a-fA-F]{6}$/', $warna)) $warna = '#1a5276';
+
+    if ($errors) {
+        $_SESSION['form_old'] = $_POST;
+        $_SESSION['flash_error'] = $errors;
+        header('Location: ' . url($id ? 'admin/tupoksi/edit/' . $id : 'admin/tupoksi/tambah'));
+        exit;
+    }
+
+    $payload = [
+        'unit_kerja'    => $unitKerja,
+        'kode_unit'     => $kodeUnit ?: null,
+        'nama_jabatan'  => $namaJabatan,
+        'tugas_pokok'   => $tugasPokok,
+        'fungsi'        => $fungsi ?: null,
+        'icon'          => $icon,
+        'warna'         => $warna,
+        'sort_order'    => $sortOrder,
+        'is_active'     => $isActive,
+    ];
+
+    if ($id > 0) {
+        $db->update('tupoksi', $payload, 'id = ?', [$id]);
+        ActivityLog::create(Auth::id(), 'update', "Update tupoksi: {$unitKerja}", 'tupoksi', $id);
+        flash('success', "Unit kerja \"{$unitKerja}\" berhasil diperbarui.");
+    } else {
+        $payload['uuid'] = Security::generateUuid();
+        $payload['created_by'] = Auth::id();
+        $id = $db->insert('tupoksi', $payload);
+        ActivityLog::create(Auth::id(), 'create', "Tambah tupoksi: {$unitKerja}", 'tupoksi', $id);
+        flash('success', "Unit kerja \"{$unitKerja}\" berhasil ditambahkan.");
+    }
+    clearOld();
+    header('Location: ' . url('admin/tupoksi'));
+    exit;
+});
+
+Router::get('/admin/tupoksi/hapus/{id}', function (string $id) {
+    Auth::requireRole(['super_admin', 'admin_bauk']);
+    $db = Database::getInstance();
+    $item = $db->fetch("SELECT unit_kerja FROM tupoksi WHERE id = ? AND deleted_at IS NULL", [(int)$id]);
+    if ($item) {
+        $db->update('tupoksi', ['deleted_at' => date('Y-m-d H:i:s')], 'id = ?', [(int)$id]);
+        ActivityLog::create(Auth::id(), 'delete', "Hapus tupoksi: {$item['unit_kerja']}", 'tupoksi', (int)$id);
+        flash('success', "Unit kerja \"{$item['unit_kerja']}\" berhasil dihapus.");
+    }
+    header('Location: ' . url('admin/tupoksi'));
+    exit;
+});
+
+// =====================================================
+// ROUTER DISPATCH - JANGAN UBAH POSISI INI
+// =====================================================
 Router::dispatch();
