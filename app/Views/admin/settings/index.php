@@ -2,15 +2,17 @@
 use App\Helpers\Auth;
 $canEdit = Auth::hasRole(['super_admin', 'admin_bauk']);
 
+// ===== ENSURE $settings IS ALWAYS AN ARRAY =====
+if (!isset($settings) || $settings === null) {
+    $settings = [];
+}
+
 // ===== GROUP MAP =====
 $groupMap = [
-    'general'   => ['label' => 'Umum', 'icon' => 'bi-gear-fill', 'color' => '#3b82f6'],
-    'contact'   => ['label' => 'Kontak', 'icon' => 'bi-telephone-fill', 'color' => '#10b981'],
+    'general'   => ['label' => 'Umum & Branding', 'icon' => 'bi-palette-fill', 'color' => '#3b82f6'],
+    'content'   => ['label' => 'Konten Halaman', 'icon' => 'bi-file-earmark-text-fill', 'color' => '#10b981'],
+    'contact'   => ['label' => 'Kontak', 'icon' => 'bi-telephone-fill', 'color' => '#f59e0b'],
     'security'  => ['label' => 'Keamanan', 'icon' => 'bi-shield-lock-fill', 'color' => '#ef4444'],
-    'email'     => ['label' => 'Email', 'icon' => 'bi-envelope-fill', 'color' => '#8b5cf6'],
-    'social'    => ['label' => 'Sosial Media', 'icon' => 'bi-share-fill', 'color' => '#f59e0b'],
-    'seo'       => ['label' => 'SEO & Meta', 'icon' => 'bi-search', 'color' => '#06b6d4'],
-    'upload'    => ['label' => 'Upload', 'icon' => 'bi-cloud-upload-fill', 'color' => '#ec4899'],
     'system'    => ['label' => 'Sistem', 'icon' => 'bi-cpu-fill', 'color' => '#64748b'],
 ];
 
@@ -18,8 +20,8 @@ $groupMap = [
 try {
     $statTotal = count($settings);
     $statGroups = count(array_unique(array_column($settings, 'group')));
-    $statEditable = count(array_filter($settings, fn($s) => in_array($s['type'], ['text', 'number', 'boolean'])));
-    $statSecurity = count(array_filter($settings, fn($s) => $s['group'] === 'security'));
+    $statEditable = count(array_filter($settings, fn($s) => in_array($s['type'] ?? '', ['text', 'number', 'boolean', 'textarea', 'file'])));
+    $statSecurity = count(array_filter($settings, fn($s) => ($s['group'] ?? '') === 'security'));
 } catch (\Throwable $e) {
     $statTotal = $statGroups = $statEditable = $statSecurity = 0;
 }
@@ -27,12 +29,65 @@ try {
 // Group settings
 $groupedSettings = [];
 foreach ($settings as $s) {
-    $groupedSettings[$s['group']][] = $s;
+    $group = $s['group'] ?? 'general';
+    $groupedSettings[$group][] = $s;
 }
 
 $currentView = $_GET['view'] ?? 'grouped';
 $activeGroup = $_GET['group'] ?? 'all';
 $searchQuery = $_GET['q'] ?? '';
+
+// Helper untuk mendapatkan URL gambar
+function getSettingImage($key, $default = '') {
+    global $settings;
+    if (empty($settings)) return $default;
+    
+    $setting = array_filter($settings, fn($s) => ($s['key'] ?? '') === $key);
+    $setting = reset($setting);
+    if ($setting && !empty($setting['value'])) {
+        return url('uploads/settings/' . $setting['value']);
+    }
+    return $default;
+}
+
+// Helper untuk merender input berdasarkan tipe
+function renderSettingInput($s, $canEdit) {
+    $key = $s['key'] ?? '';
+    $val = $s['value'] ?? '';
+    $type = $s['type'] ?? 'text';
+    
+    if (!$canEdit) {
+        if ($type === 'file' && !empty($val)) {
+            return '<img src="' . url('uploads/settings/' . $val) . '" class="img-preview" style="max-height:80px;">';
+        }
+        return '<span class="ult-settings-value">' . htmlspecialchars($val ?: '-') . '</span>';
+    }
+
+    $keyEscaped = htmlspecialchars($key);
+    $valEscaped = htmlspecialchars($val);
+
+    if ($type === 'boolean') {
+        return '<select name="settings[' . $keyEscaped . ']">
+            <option value="1" ' . ($val == '1' ? 'selected' : '') . '>Aktif</option>
+            <option value="0" ' . ($val == '0' ? 'selected' : '') . '>Nonaktif</option>
+        </select>';
+    } elseif ($type === 'number') {
+        return '<input type="number" name="settings[' . $keyEscaped . ']" value="' . $valEscaped . '" step="any">';
+    } elseif ($type === 'textarea' || in_array($key, ['visi_text', 'misi_text', 'contact_address'])) {
+        return '<textarea name="settings[' . $keyEscaped . ']" rows="4">' . $valEscaped . '</textarea>';
+    } elseif ($type === 'file') {
+        $previewId = 'preview_' . str_replace(['-', '_'], '', $key);
+        $placeholderSvg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%23f1f5f9'/%3E%3Cpath d='M30 40 L45 55 L70 30' stroke='%2394a3b8' stroke-width='4' fill='none'/%3E%3Ctext x='50' y='80' font-family='sans-serif' font-size='12' fill='%2394a3b8' text-anchor='middle'%3ENo Image%3C/text%3E%3C/svg%3E";
+        $currentImg = getSettingImage($key, $placeholderSvg);
+        $accept = in_array($key, ['site_favicon']) ? '.ico,.png,.svg' : '.png,.jpg,.jpeg,.svg,.webp';
+        return '<div class="image-upload-box">
+            <img src="' . $currentImg . '" id="' . $previewId . '" class="img-preview">
+            <input type="file" name="' . htmlspecialchars($key) . '" accept="' . $accept . '" onchange="previewImage(this, \'' . $previewId . '\')" class="form-control mt-2">
+        </div>';
+    } else {
+        return '<input type="text" name="settings[' . $keyEscaped . ']" value="' . $valEscaped . '" maxlength="500">';
+    }
+}
 ?>
 
 <!-- ===== ULTIMATE STYLES ===== -->
@@ -89,17 +144,28 @@ $searchQuery = $_GET['q'] ?? '';
 .ult-settings-view-toggle button.active{background:var(--admin-primary);color:#fff;}
 .ult-settings-view-toggle button:hover:not(.active){background:var(--admin-border);}
 
-/* ===== TABLE ENHANCEMENTS ===== */
+/* ===== TABLE & FORM ENHANCEMENTS ===== */
 .ult-settings-table-wrap{overflow-x:auto;}
-.ult-settings-cell{display:flex;align-items:center;gap:.75rem;min-width:180px;}
 .ult-settings-key{font-family:monospace;font-size:.825rem;font-weight:700;color:var(--admin-primary);background:rgba(26,82,118,.08);padding:.25rem .625rem;border-radius:6px;border:1px solid rgba(26,82,118,.15);}
-.ult-settings-value{font-size:.875rem;color:var(--admin-text);font-weight:500;}
 .ult-settings-value input,.ult-settings-value textarea,.ult-settings-value select{width:100%;padding:.5rem .75rem;border:1.5px solid var(--admin-border);border-radius:var(--radius-md);font-size:.85rem;background:var(--admin-bg);transition:all .2s;font-family:inherit;}
 .ult-settings-value input:focus,.ult-settings-value textarea:focus,.ult-settings-value select:focus{outline:none;border-color:var(--admin-primary);background:#fff;box-shadow:0 0 0 3px rgba(26,82,118,.08);}
-.ult-settings-value textarea{resize:vertical;min-height:60px;}
+.ult-settings-value textarea{resize:vertical;min-height:80px;}
 .ult-settings-group{display:inline-flex;align-items:center;gap:.375rem;padding:.25rem .75rem;border-radius:50px;font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.3px;}
 .ult-settings-desc{font-size:.8rem;color:var(--admin-text-secondary);line-height:1.5;}
 .ult-settings-type{display:inline-flex;align-items:center;gap:.375rem;padding:.25rem .625rem;background:var(--admin-bg);border-radius:50px;font-size:.7rem;font-weight:600;color:var(--admin-text-muted);}
+
+/* ===== IMAGE UPLOAD BOX ===== */
+.image-upload-box {
+    border: 2px dashed var(--admin-border); border-radius: var(--radius-md);
+    padding: 1rem; text-align: center; background: var(--admin-bg); transition: all 0.2s;
+}
+.image-upload-box:hover { border-color: var(--admin-primary); background: rgba(26, 82, 118, 0.05); }
+.img-preview {
+    max-width: 100%; max-height: 100px; object-fit: contain;
+    border-radius: var(--radius-sm); margin-bottom: 0.5rem;
+    border: 1px solid var(--admin-border); background: #fff;
+}
+.mt-2 { margin-top: 0.5rem; }
 
 /* ===== GROUP SECTIONS ===== */
 .ult-settings-group-section{margin-bottom:2rem;}
@@ -171,7 +237,7 @@ $searchQuery = $_GET['q'] ?? '';
         <div class="ult-settings-stat-info">
             <div class="ult-settings-stat-label">Dapat Diedit</div>
             <div class="ult-settings-stat-value"><?= number_format($statEditable) ?></div>
-            <div class="ult-settings-stat-sub"><i class="bi bi-check-circle-fill"></i> Text/Number/Boolean</div>
+            <div class="ult-settings-stat-sub"><i class="bi bi-check-circle-fill"></i> Text/Number/File</div>
         </div>
     </div>
     <div class="ult-settings-stat" style="--ult-color:#ef4444;">
@@ -188,7 +254,7 @@ $searchQuery = $_GET['q'] ?? '';
 <div class="page-header">
     <div>
         <h1 class="page-title">Pengaturan Sistem</h1>
-        <p class="page-subtitle">Konfigurasi sistem & keamanan BAUK UNIMOF</p>
+        <p class="page-subtitle">Konfigurasi branding, konten, dan keamanan BAUK UNIMOF</p>
     </div>
     <div class="ult-settings-header-actions">
         <div class="ult-settings-view-toggle" id="ultSettingsViewToggle">
@@ -203,9 +269,6 @@ $searchQuery = $_GET['q'] ?? '';
             </button>
         </div>
         <?php if ($canEdit): ?>
-        <button type="button" class="btn btn-secondary" onclick="if(typeof showToast!=='undefined')showToast('Reset ke default segera hadir','info');">
-            <i class="bi bi-arrow-counterclockwise"></i> Reset Default
-        </button>
         <button type="button" class="btn btn-primary" onclick="document.getElementById('ultSettingsForm').submit()">
             <i class="bi bi-save-fill"></i> Simpan Semua
         </button>
@@ -216,18 +279,6 @@ $searchQuery = $_GET['q'] ?? '';
 <!-- ===== MAIN CARD ===== -->
 <div class="card">
     <div class="card-body" style="padding:0;">
-        
-        <!-- Card Header -->
-        <div style="padding:1.25rem 1.5rem;border-bottom:1px solid var(--admin-border);">
-            <div class="ult-settings-header">
-                <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
-                    <h3 class="card-title" style="margin:0;"><i class="bi bi-gear-fill"></i> Konfigurasi Sistem</h3>
-                    <span class="pgn-result-info">
-                        Total <strong><?= number_format($statTotal) ?></strong> pengaturan dalam <strong><?= number_format($statGroups) ?></strong> grup
-                    </span>
-                </div>
-            </div>
-        </div>
         
         <!-- Toolbar -->
         <form method="GET" action="<?= url('admin/pengaturan') ?>" class="pgn-toolbar" style="padding:1rem 1.5rem;border-bottom:1px solid var(--admin-border);">
@@ -299,7 +350,7 @@ $searchQuery = $_GET['q'] ?? '';
         <?php endif; ?>
         
         <?php if ($canEdit): ?>
-        <form method="POST" action="<?= url('admin/pengaturan/simpan') ?>" id="ultSettingsForm">
+        <form method="POST" action="<?= url('admin/pengaturan/simpan') ?>" enctype="multipart/form-data" id="ultSettingsForm">
             <input type="hidden" name="csrf_token" value="<?= \App\Helpers\Security::generateCsrfToken() ?>">
         <?php endif; ?>
         
@@ -310,7 +361,6 @@ $searchQuery = $_GET['q'] ?? '';
                 if ($activeGroup !== 'all' && $activeGroup !== $group) continue;
                 $gInfo = $groupMap[$group] ?? ['label' => ucfirst($group), 'icon' => 'bi-folder-fill', 'color' => '#64748b'];
                 
-                // Filter by search
                 $filteredItems = $items;
                 if ($searchQuery !== '') {
                     $filteredItems = array_filter($items, function($s) use ($searchQuery) {
@@ -336,9 +386,9 @@ $searchQuery = $_GET['q'] ?? '';
                         <thead>
                             <tr>
                                 <th style="width:25%;">Key</th>
-                                <th style="width:35%;">Value</th>
+                                <th style="width:40%;">Value</th>
                                 <th style="width:15%;">Tipe</th>
-                                <th style="width:25%;">Keterangan</th>
+                                <th style="width:20%;">Keterangan</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -346,22 +396,9 @@ $searchQuery = $_GET['q'] ?? '';
                             <tr>
                                 <td><span class="ult-settings-key"><?= htmlspecialchars($s['key']) ?></span></td>
                                 <td class="ult-settings-value">
-                                    <?php if ($canEdit): ?>
-                                        <?php if ($s['type'] === 'boolean'): ?>
-                                            <select name="settings[<?= htmlspecialchars($s['key']) ?>]">
-                                                <option value="1" <?= ($s['value'] ?? '0') == '1' ? 'selected' : '' ?>>Aktif</option>
-                                                <option value="0" <?= ($s['value'] ?? '0') == '0' ? 'selected' : '' ?>>Nonaktif</option>
-                                            </select>
-                                        <?php elseif ($s['type'] === 'number'): ?>
-                                            <input type="number" name="settings[<?= htmlspecialchars($s['key']) ?>]" value="<?= htmlspecialchars($s['value'] ?? '') ?>" step="any">
-                                        <?php else: ?>
-                                            <input type="text" name="settings[<?= htmlspecialchars($s['key']) ?>]" value="<?= htmlspecialchars($s['value'] ?? '') ?>" maxlength="500">
-                                        <?php endif; ?>
-                                    <?php else: ?>
-                                        <span class="ult-settings-value"><?= htmlspecialchars($s['value'] ?? '-') ?></span>
-                                    <?php endif; ?>
+                                    <?= renderSettingInput($s, $canEdit) ?>
                                 </td>
-                                <td><span class="ult-settings-type"><i class="bi bi-<?= $s['type'] === 'boolean' ? 'toggle-on' : ($s['type'] === 'number' ? '123' : 'type') ?>"></i> <?= ucfirst($s['type']) ?></span></td>
+                                <td><span class="ult-settings-type"><i class="bi bi-<?= $s['type'] === 'boolean' ? 'toggle-on' : ($s['type'] === 'number' ? '123' : ($s['type'] === 'file' ? 'image' : 'type')) ?>"></i> <?= ucfirst($s['type']) ?></span></td>
                                 <td class="ult-settings-desc"><?= htmlspecialchars($s['description'] ?? '-') ?></td>
                             </tr>
                         <?php endforeach; ?>
@@ -375,7 +412,7 @@ $searchQuery = $_GET['q'] ?? '';
             <div class="ult-settings-empty">
                 <div class="ult-settings-empty-icon"><i class="bi bi-gear"></i></div>
                 <h3>Tidak Ada Pengaturan</h3>
-                <p>Belum ada pengaturan dalam sistem. Pengaturan akan muncul setelah diinisialisasi.</p>
+                <p>Belum ada pengaturan dalam sistem.</p>
             </div>
             <?php endif; ?>
         </div>
@@ -383,15 +420,15 @@ $searchQuery = $_GET['q'] ?? '';
         
         <!-- ===== TABLE VIEW ===== -->
         <?php if ($currentView === 'table'): ?>
-        <div id="ultSettingsTableView" class="ult-settings-table-wrap">
+        <div id="ultSettingsTableView" class="ult-settings-table-wrap" style="padding:1.5rem;">
             <table class="data-table">
                 <thead>
                     <tr>
                         <th style="width:20%;">Key</th>
-                        <th style="width:30%;">Value</th>
+                        <th style="width:40%;">Value</th>
                         <th style="width:15%;">Grup</th>
-                        <th style="width:15%;">Tipe</th>
-                        <th style="width:20%;">Keterangan</th>
+                        <th style="width:10%;">Tipe</th>
+                        <th style="width:15%;">Keterangan</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -403,27 +440,14 @@ $searchQuery = $_GET['q'] ?? '';
                     <tr>
                         <td><span class="ult-settings-key"><?= htmlspecialchars($s['key']) ?></span></td>
                         <td class="ult-settings-value">
-                            <?php if ($canEdit): ?>
-                                <?php if ($s['type'] === 'boolean'): ?>
-                                    <select name="settings[<?= htmlspecialchars($s['key']) ?>]">
-                                        <option value="1" <?= ($s['value'] ?? '0') == '1' ? 'selected' : '' ?>>Aktif</option>
-                                        <option value="0" <?= ($s['value'] ?? '0') == '0' ? 'selected' : '' ?>>Nonaktif</option>
-                                    </select>
-                                <?php elseif ($s['type'] === 'number'): ?>
-                                    <input type="number" name="settings[<?= htmlspecialchars($s['key']) ?>]" value="<?= htmlspecialchars($s['value'] ?? '') ?>" step="any">
-                                <?php else: ?>
-                                    <input type="text" name="settings[<?= htmlspecialchars($s['key']) ?>]" value="<?= htmlspecialchars($s['value'] ?? '') ?>" maxlength="500">
-                                <?php endif; ?>
-                            <?php else: ?>
-                                <span class="ult-settings-value"><?= htmlspecialchars($s['value'] ?? '-') ?></span>
-                            <?php endif; ?>
+                            <?= renderSettingInput($s, $canEdit) ?>
                         </td>
                         <td>
                             <span class="ult-settings-group" style="background:<?= $gInfo['color'] ?>20;color:<?= $gInfo['color'] ?>;">
                                 <i class="bi <?= $gInfo['icon'] ?>"></i> <?= $gInfo['label'] ?>
                             </span>
                         </td>
-                        <td><span class="ult-settings-type"><i class="bi bi-<?= $s['type'] === 'boolean' ? 'toggle-on' : ($s['type'] === 'number' ? '123' : 'type') ?>"></i> <?= ucfirst($s['type']) ?></span></td>
+                        <td><span class="ult-settings-type"><?= ucfirst($s['type']) ?></span></td>
                         <td class="ult-settings-desc"><?= htmlspecialchars($s['description'] ?? '-') ?></td>
                     </tr>
                 <?php endforeach; ?>
@@ -457,20 +481,7 @@ $searchQuery = $_GET['q'] ?? '';
                 <div class="ult-settings-card-body">
                     <div class="ult-settings-card-value">
                         <label>Nilai</label>
-                        <?php if ($canEdit): ?>
-                            <?php if ($s['type'] === 'boolean'): ?>
-                                <select name="settings[<?= htmlspecialchars($s['key']) ?>]">
-                                    <option value="1" <?= ($s['value'] ?? '0') == '1' ? 'selected' : '' ?>>Aktif</option>
-                                    <option value="0" <?= ($s['value'] ?? '0') == '0' ? 'selected' : '' ?>>Nonaktif</option>
-                                </select>
-                            <?php elseif ($s['type'] === 'number'): ?>
-                                <input type="number" name="settings[<?= htmlspecialchars($s['key']) ?>]" value="<?= htmlspecialchars($s['value'] ?? '') ?>" step="any">
-                            <?php else: ?>
-                                <input type="text" name="settings[<?= htmlspecialchars($s['key']) ?>]" value="<?= htmlspecialchars($s['value'] ?? '') ?>" maxlength="500">
-                            <?php endif; ?>
-                        <?php else: ?>
-                            <div style="padding:.5rem;background:var(--admin-bg);border-radius:6px;font-size:.875rem;"><?= htmlspecialchars($s['value'] ?? '-') ?></div>
-                        <?php endif; ?>
+                        <?= renderSettingInput($s, $canEdit) ?>
                     </div>
                     <div class="ult-settings-card-desc">
                         <i class="bi <?= $gInfo['icon'] ?>" style="color:<?= $gInfo['color'] ?>;"></i>
@@ -498,7 +509,7 @@ $searchQuery = $_GET['q'] ?? '';
                 <i class="bi bi-info-circle-fill"></i> Perubahan akan disimpan ke database
             </div>
             <div style="display:flex;gap:.5rem;">
-                <button type="button" class="btn btn-secondary" onclick="if(typeof showToast!=='undefined')showToast('Reset ke default segera hadir','info');">
+                <button type="reset" class="btn btn-secondary">
                     <i class="bi bi-arrow-counterclockwise"></i> Reset
                 </button>
                 <button type="submit" class="btn btn-primary">
@@ -520,6 +531,17 @@ $searchQuery = $_GET['q'] ?? '';
 (function(){
     'use strict';
     
+    // ===== IMAGE PREVIEW =====
+    window.previewImage = function(input, previewId) {
+        if (input.files && input.files[0]) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                document.getElementById(previewId).src = e.target.result;
+            }
+            reader.readAsDataURL(input.files[0]);
+        }
+    };
+
     // ===== CUSTOM DROPDOWN =====
     document.querySelectorAll('.ult-settings-dropdown[data-dropdown]').forEach(function(dd){
         const trigger = dd.querySelector('.ult-settings-dropdown-trigger');

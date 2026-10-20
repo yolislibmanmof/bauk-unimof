@@ -193,8 +193,31 @@ Router::post('/admin/login', function () {
 });
 
 Router::get('/admin/logout', function () {
-    (new Auth())->logout();
-    header('Location: ' . url('admin/login')); exit;
+    // 1. Catat log logout SEBELUM session dihancurkan
+    if (Auth::check()) {
+        try {
+            ActivityLog::create(Auth::id(), 'logout', 'User logout dari sistem');
+        } catch (\Throwable $e) {
+            // Abaikan jika gagal logging
+        }
+    }
+    
+    // 2. Hancurkan session secara aman
+    session_unset();
+    session_destroy();
+    
+    // 3. Hapus cookie session dari browser
+    if (isset($_COOKIE[session_name()])) {
+        setcookie(session_name(), '', time() - 3600, '/');
+    }
+    
+    // 4. Mulai session baru KHUSUS untuk flash message
+    session_start();
+    $_SESSION['flash_success'] = 'Anda telah logout dengan sukses.';
+    
+    // 5. Redirect ke halaman login
+    header('Location: ' . url('admin/login'));
+    exit;
 });
 
 // =====================================================
@@ -1368,15 +1391,74 @@ Router::get('/admin/pengaturan', function () {
 Router::post('/admin/pengaturan/simpan', function () {
     Auth::requireRole(['super_admin', 'admin_bauk']);
     $db = Database::getInstance();
-    foreach ($_POST['settings'] ?? [] as $key => $value) {
-        $value = is_string($value) ? Security::sanitize($value) : $value;
+    $errors = [];
+
+    // 1. Handle Text/Textarea Inputs
+    $textKeys = ['site_name', 'site_description', 'visi_text', 'misi_text', 'kepala_bauk_name', 'kepala_bauk_title', 'contact_address', 'contact_phone', 'contact_email'];
+    foreach ($textKeys as $key) {
+        $value = Security::sanitize($_POST[$key] ?? '');
         $existing = $db->fetch("SELECT id FROM settings WHERE `key` = ?", [$key]);
-        if ($existing) $db->update('settings', ['value' => $value], 'id = ?', [$existing['id']]);
-        else $db->insert('settings', ['key' => $key, 'value' => $value, 'type' => 'text', 'group' => 'general']);
+        if ($existing) {
+            $db->update('settings', ['value' => $value], 'id = ?', [$existing['id']]);
+        } else {
+            $db->insert('settings', ['key' => $key, 'value' => $value, 'type' => 'text', 'group' => 'general']);
+        }
     }
-    ActivityLog::create(Auth::id(), 'update', 'Update pengaturan sistem', 'settings');
+
+    // 2. Handle File Uploads (Logo, Favicon, Photos)
+    $fileKeys = [
+        'site_logo' => ['jpg', 'jpeg', 'png', 'svg', 'webp', 2048], // max 2MB
+        'site_favicon' => ['ico', 'png', 'svg', 1024], // max 1MB
+        'kepala_bauk_photo' => ['jpg', 'jpeg', 'png', 'webp', 2048],
+        'struktur_organisasi_photo' => ['jpg', 'jpeg', 'png', 'webp', 5120], // max 5MB
+    ];
+
+    foreach ($fileKeys as $key => $rules) {
+        if (isset($_FILES[$key]) && $_FILES[$key]['error'] === UPLOAD_ERR_OK) {
+            $extAllowed = array_slice($rules, 0, -1);
+            $maxSize = end($rules) * 1024;
+            
+            $errs = Security::validateFileUpload($_FILES[$key], $extAllowed, $maxSize);
+            if ($errs) {
+                $errors = array_merge($errors, ["{$key}: " . implode(', ', $errs)]);
+            } else {
+                $dir = ensureUploadDir('settings');
+                $newName = safeFilename($_FILES[$key]['name']);
+                
+                if (move_uploaded_file($_FILES[$key]['tmp_name'], $dir . $newName)) {
+                    // Hapus file lama jika ada
+                    $oldSetting = $db->fetch("SELECT value FROM settings WHERE `key` = ?", [$key]);
+                    if ($oldSetting && !empty($oldSetting['value'])) {
+                        $oldFile = UPLOAD_DIR . 'settings/' . basename($oldSetting['value']);
+                        if (file_exists($oldFile) && is_file($oldFile)) {
+                            @unlink($oldFile);
+                        }
+                    }
+                    
+                    // Simpan nama file baru ke DB
+                    $existing = $db->fetch("SELECT id FROM settings WHERE `key` = ?", [$key]);
+                    if ($existing) {
+                        $db->update('settings', ['value' => $newName], 'id = ?', [$existing['id']]);
+                    } else {
+                        $db->insert('settings', ['key' => $key, 'value' => $newName, 'type' => 'file', 'group' => 'branding']);
+                    }
+                } else {
+                    $errors[] = "{$key}: Gagal memindahkan file.";
+                }
+            }
+        }
+    }
+
+    if (!empty($errors)) {
+        $_SESSION['flash_error'] = $errors;
+        header('Location: ' . url('admin/pengaturan'));
+        exit;
+    }
+
+    ActivityLog::create(Auth::id(), 'update', 'Update pengaturan sistem & branding', 'settings');
     flash('success', 'Pengaturan berhasil disimpan.');
-    header('Location: ' . url('admin/pengaturan')); exit;
+    header('Location: ' . url('admin/pengaturan'));
+    exit;
 });
 
 // =====================================================

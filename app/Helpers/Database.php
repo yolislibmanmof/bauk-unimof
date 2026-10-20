@@ -74,21 +74,29 @@ class Database
         return $this->query($sql, $params)->fetch();
     }
 
+    /**
+     * Insert data into table (dengan backtick untuk mencegah reserved keyword error)
+     */
     public function insert(string $table, array $data): int
     {
-        $columns = implode(', ', array_keys($data));
+        // Wrap column names and table name with backticks
+        $columns = implode(', ', array_map(fn($k) => '`' . trim($k, '`') . '`', array_keys($data)));
         $placeholders = implode(', ', array_fill(0, count($data), '?'));
         
-        $sql = "INSERT INTO {$table} ({$columns}) VALUES ({$placeholders})";
+        $sql = "INSERT INTO `" . trim($table, '`') . "` ({$columns}) VALUES ({$placeholders})";
         $this->query($sql, array_values($data));
         
         return (int) $this->connection->lastInsertId();
     }
 
+    /**
+     * Update data in table (dengan backtick untuk mencegah reserved keyword error)
+     */
     public function update(string $table, array $data, string $where, array $whereParams = []): int
     {
-        $set = implode(', ', array_map(fn($col) => "{$col} = ?", array_keys($data)));
-        $sql = "UPDATE {$table} SET {$set} WHERE {$where}";
+        // Wrap column names and table name with backticks
+        $set = implode(', ', array_map(fn($k) => '`' . trim($k, '`') . '` = ?', array_keys($data)));
+        $sql = "UPDATE `" . trim($table, '`') . "` SET {$set} WHERE {$where}";
         
         $stmt = $this->query($sql, array_merge(array_values($data), $whereParams));
         return $stmt->rowCount();
@@ -96,14 +104,14 @@ class Database
 
     public function delete(string $table, string $where, array $params = []): int
     {
-        $sql = "DELETE FROM {$table} WHERE {$where}";
+        $sql = "DELETE FROM `" . trim($table, '`') . "` WHERE {$where}";
         $stmt = $this->query($sql, $params);
         return $stmt->rowCount();
     }
 
     public function count(string $table, string $where = '1=1', array $params = []): int
     {
-        $sql = "SELECT COUNT(*) as total FROM {$table} WHERE {$where}";
+        $sql = "SELECT COUNT(*) as total FROM `" . trim($table, '`') . "` WHERE {$where}";
         $result = $this->fetch($sql, $params);
         return (int) ($result['total'] ?? 0);
     }
