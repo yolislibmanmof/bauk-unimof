@@ -1,0 +1,4 @@
+<div class="page-header"><div><h1 class="page-title">Log Aktivitas</h1><p class="page-subtitle">Audit trail sistem</p></div></div>
+<div class="card"><div class="card-body data-table-wrapper"><table class="data-table"><thead><tr><th>Waktu</th><th>Pengguna</th><th>Aksi</th><th>Keterangan</th><th>IP</th></tr></thead><tbody>
+<?php foreach ($logs as $l): ?><tr><td><?= date('d M Y H:i:s', strtotime($l['created_at'])) ?></td><td><?= htmlspecialchars($l['full_name'] ?? $l['username'] ?? 'System') ?></td><td><span class="activity-badge badge-<?= htmlspecialchars($l['action']) ?>"><?= htmlspecialchars($l['action']) ?></span></td><td><?= htmlspecialchars($l['description']) ?></td><td><?= htmlspecialchars($l['ip_address']) ?></td></tr><?php endforeach; ?>
+</tbody></table></div></div>

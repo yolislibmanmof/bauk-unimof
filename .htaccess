@@ -1,0 +1,32 @@
+# =====================================================
+# BAUK UNIMOF - Root .htaccess (FIXED)
+# =====================================================
+RewriteEngine On
+
+# Blokir akses langsung ke folder sensitif
+RewriteRule ^(app|config|database)(/|$) - [F,L]
+
+# Sajikan file assets & uploads dari folder public/
+RewriteRule ^(assets|uploads)/(.*)$ public/$1/$2 [L]
+
+# Jika file/direktori benar-benar ada, sajikan langsung
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Selain itu, lempar ke front controller (index.php)
+RewriteRule ^ index.php [QSA,L]
+
+Options -Indexes
+
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always unset X-Powered-By
+</IfModule>
+
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/css application/javascript application/json
+</IfModule>
